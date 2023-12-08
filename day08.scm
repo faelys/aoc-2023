@@ -90,7 +90,7 @@
 ;(write-line (conc "First puzzle:  " (count-links-until '() "AAA" "ZZZ" 0)))
 
 ;;;;;;;;;;;;;;;;;
-;; Second Puzzle (inefficient)
+;; Second Puzzle
 
 (define (start-node? node)
   (equal? (substring node 2 3) "A"))
@@ -98,72 +98,11 @@
 (define (final-node? node)
   (equal? (substring node 2 3) "Z"))
 
-(define (follow-directions directions node-history)
-  (if (null? directions)
-      (reverse node-history)
-      (follow-directions (cdr directions)
-                         (cons
-                           (follow-link (car directions) (car node-history))
-                           node-history))))
-
-(define (process-history node-history end-steps steps last-node)
-  (if (null? node-history)
-      (list last-node end-steps)
-      (process-history (cdr node-history)
-                       (if (final-node? (car node-history))
-                           (cons steps end-steps)
-                           end-steps)
-                       (add1 steps)
-                       (car node-history))))
-
-(define (process-node node)
-  (process-history (follow-directions (car data) (list node)) '() 0 '()))
-
-(define end-table
-  (alist->hash-table
-    (map (lambda (key) ;(write-line (conc key " -> " (process-node key)))
-            (cons key (process-node key)))
-         (hash-table-keys left-link-table))))
-
-(define (is-in? n l)
-  (cond ((null? l) #f)
-        ((= n (car l)) #t)
-        (else (is-in? n (cdr l)))))
-
-(define (intersect l1 l2)
-  (let loop ((todo l1) (acc '()))
-    (if (null? todo)
-        acc
-        (loop (cdr todo)
-              (if (is-in? (car todo) l2) (cons (car todo) acc) acc)))))
-
-(define (intersect-list l)
-  (let loop ((todo (cdr l)) (acc (car l)))
-    (if (null? todo)
-        acc
-        (loop (cdr todo) (intersect (car todo) acc)))))
-
-(define (answer-2 nodes past-cycles)
-  (write-line (conc "Cycle " past-cycles ": " nodes))
-  (let ((local-data (map (lambda (x) (hash-table-ref end-table x)) nodes)))
-    (let ((next-nodes (map car local-data))
-          (end-steps (map cadr local-data)))
-      (let ((merged-end-steps (intersect-list end-steps)))
-         (if (null? merged-end-steps)
-             (answer-2 next-nodes (add1 past-cycles))
-             (+ (* past-cycles (length (car data)))
-                (apply min merged-end-steps)))))))
-
-(define start-nodes
-  (filter start-node? (hash-table-keys left-link-table)))
-
-;(write-line (conc "Second puzzle: " (answer-2 start-nodes 0)))
-
-;;;;;;;;;;;;;;;;;
-;; Second Puzzle
-
 (define node-list
   (hash-table-keys left-link-table))
+
+(define start-node-list
+  (filter start-node? node-list))
 
 (define state-list
   (let loop ((directions (car data))
@@ -175,6 +114,9 @@
                       (cdr nodes)
                       (cons (cons (car nodes) directions) acc))))))
 
+(define final-state-list
+  (filter (lambda (state) (final-node? (car state))) state-list))
+
 (define (next-state state)
   (let ((node (car state))
         (cur-dir (cadr state))
@@ -182,85 +124,49 @@
     (cons (follow-link cur-dir node)
           (if (null? next-dir) (car data) next-dir))))
 
-; state -> '(steps-to-cycle cycle-length cycle-start)
-(define state-cycle-table (make-hash-table))
+(define next-final-memo (make-hash-table))
 
-(define (state-cycle! state previous-steps)
-  (if (hash-table-exists? state-cycle-table state)
-      (let ((entry (hash-table-ref state-cycle-table state)))
-        (cond ((pair? entry) entry)
-              ((integer? entry) (hash-table-set! state-cycle-table state
-                                  (list 0 (- previous-steps entry) state))
-                                (state-cycle! (next-state state)
-                                              (add1 previous-steps)))))
-      (begin
-        (hash-table-set! state-cycle-table state previous-steps)
-        (let ((next-result
-                 (state-cycle! (next-state state) (add1 previous-steps))))
-           (if (integer? (hash-table-ref state-cycle-table state))
-               (hash-table-set! state-cycle-table state
-                  (cons (add1 (car next-result)) (cdr next-result))))
-           (hash-table-ref state-cycle-table state)))))
+; state -> '(steps next-final-state)
+(define (next-final! state)
+  (cond ((final-node? (car state)) (list 0 state))
+        ((hash-table-exists? next-final-memo state)
+          (hash-table-ref next-final-memo state))
+        (else
+          (let* ((next-result (next-final! (next-state state)))
+                 (result (cons (add1 (car next-result)) (cdr next-result))))
+;           (write-line (conc "next-final " state " -> " result))
+            (hash-table-set! next-final-memo state result)
+            result))))
 
-; state-in-cycle -> '(cycle-length steps-to-ends-in-cycle)
-; state-out-of-cycle
-;    -> '(steps-to-ends-before-cycle steps-to-cycle
-;         cycle-length steps-to-ends-in-cycle)
-(define state-ends-table (make-hash-table))
+; position: '(state steps)
+(define (update-beyond position min-steps)
+  (let* ((next-final (next-final! (next-state (car position))))
+         (state (cadr next-final))
+         (steps (+ (cadr position) 1 (car next-final)))
+         (updated-position (list state steps)))
+    (if (>= steps min-steps)
+        updated-position
+        (update-beyond updated-position min-steps))))
 
-(define (steps-to-ends-in-cycle from-state)
-  (let loop ((state (next-state from-state))
-             (steps 1)
-             (acc (if (final-node? (car from-state)) '(0) '())))
-    (if (equal? state from-state)
-        acc
-        (loop (next-state state)
-              (add1 steps)
-              (if (final-node? (car state))
-                  (cons steps acc)
-                  acc)))))
+(define (finished? positions)
+  (apply = (map cadr positions)))
 
-(define (build-entry state steps steps-to-ends-before-cycle)
-  (let ((entry (hash-table-ref state-ends-table state)))
-    (if (and (pair? entry) (= (length entry) 2))
-        (cons steps-to-ends-before-cycle (cons steps entry))
-        (build-entry (next-state state)
-                     (add1 steps)
-                     (if (final-node? (car state))
-                         (cons steps steps-to-ends-before-cycle)
-                         steps-to-ends-before-cycle)))))
+(define (update-positions positions)
+  (let ((min-steps (apply min (map cadr positions)))
+        (max-steps (apply max (map cadr positions))))
+    (write-line (conc "Updating from steps " min-steps "+" (- max-steps min-steps)))
+    (map (lambda (position) (if (< (cadr position) max-steps)
+                                (update-beyond position max-steps)
+                                position))
+         positions)))
 
+(define (answer-2 positions)
+; (write-line (conc "Positions: " positions))
+  (if (finished? positions)
+      (write-line (conc "Second puzzle: " (cadar positions)))
+      (answer-2 (update-positions positions))))
 
-(define (state-ends! state previous-steps)
-  (if (hash-table-exists? state-ends-table state)
-      (let ((entry (hash-table-ref state-ends-table state)))
-        (cond ((pair? entry) entry)
-              ((integer? entry)
-                  (hash-table-set! state-ends-table state
-                     (list (- previous-steps entry)
-                           (steps-to-ends-in-cycle state)))
-                  (state-ends! (next-state state) (add1 previous-steps))
-                  (hash-table-ref state-ends-table state))))
-      (begin
-        (hash-table-set! state-ends-table state previous-steps)
-        (let ((next-result
-                (state-ends! (next-state state) (add1 previous-steps))))
-          (if (integer? (hash-table-ref state-ends-table state))
-              (hash-table-set! state-ends-table state
-                 (build-entry state 0 '())))
-          (hash-table-ref state-ends-table state)))))
+(define start-positions
+  (map (lambda (node) (list (cons node (car data)) 0)) start-node-list))
 
-(define start-node-list
-  (filter start-node? node-list))
-
-(write-line (conc "Start nodes: " start-node-list))
-
-(define data-2
-  (map (lambda (node) (state-ends! (cons node (car data)) 0)) start-node-list))
-
-(let loop ((rest data-2))
-  (unless (null? rest)
-    (write-line (conc (car rest)))
-    (loop (cdr rest))))
-
-(write-line (conc "Second puzzle: " ))
+(answer-2 (map (lambda (x) (update-beyond x 0)) start-positions))
