@@ -13,9 +13,10 @@
 ; OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 (import (chicken io) (chicken string)
-        trace
         srfi-1
-        srfi-69)
+        srfi-69
+        srfi-128
+        srfi-146)
 
 (define verbose #t)
 
@@ -110,107 +111,92 @@
           (yloop (add1 y))))
       (loop (cdr suffixes)))))
 
+(define (state-part->number x)
+  (cond ((number? x) x)
+        ((eqv? x 'right) 0)
+        ((eqv? x 'left)  1)
+        ((eqv? x 'down)  2)
+        ((eqv? x 'up)    3)
+        (else (assert #f))))
+
+(define (state-index state)
+  (let ((x     (car    state))
+        (y     (cadr   state))
+        (steps (caddr  state))
+        (dir   (cadddr state)))
+    (+ x (* data-width
+    (+ y (* data-height
+    (+ (state-part->number dir) (* 4 steps))))))))
+
+(define max-state-index (* data-width data-height 50))
+
 ;; Queue management
 
-(define (queue-line-new state score)
-  (cons score state))
+(define (recursive-less a b)
+    (let ((aa (state-part->number (car a))) (bb (state-part->number (car b))))
+      (or (< aa bb)
+          (and (= aa bb)
+               (recursive-less (cdr a) (cdr b))))))
 
-(define (queue-line-add queue-line state score)
-  (assert (= (car queue-line) score))
-  (cons score (cons state (cdr queue-line))))
+(define (scored-state? s)
+  (and (pair? s)
+       (number? (car s)) ; score
+       (number? (cadr s)) ; x
+       (number? (caddr s)) ; y
+       (number? (cadddr s)) ; steps
+       (symbol? (car (cddddr s))) ; direction
+       (null?   (cdr (cddddr s)))))
 
-(define (queue-line-rm queue-line state score)
-  (assert (= (car queue-line) score))
-  (let loop ((todo (cdr queue-line)) (acc '()))
-    (assert (not (null? todo)))
-    (if (equal? state (car todo))
-        (cons score (append acc (cdr todo)))
-        (loop (cdr todo) (cons (car todo) acc)))))
-
-(define (queue-line-head-rm queue state score)
-  (assert (= (caar queue) score))
-  (if (= 2 (length (car queue)))
-      (begin
-         (assert (equal? state (cadar queue)))
-         (cdr queue))
-      (cons (queue-line-rm (car queue) state score)
-            (cdr queue))))
+(define scored-state-comparator
+  (make-comparator scored-state? equal? recursive-less default-hash))
 
 (define (queue-add queue state score)
-  (let loop ((todo queue) (smaller '()))
-    (cond ((or (null? todo) (> (caar todo) score))
-              (append (reverse smaller) `((,score ,state)) todo))
-          ((= (caar todo) score)
-              (append (reverse smaller)
-                      `((,score ,state . ,(cdar todo)))
-                      (cdr todo)))
-          (else (loop (cdr todo) (cons (car todo) smaller))))))
+  (mapping-set! queue (cons score state) #t))
 
 (define (queue-update queue state old-score new-score)
-  (assert (< new-score old-score))
-  (let loop ((todo queue) (smaller '()) (seen #f))
-    (assert (not (null? todo)))
-    (cond ((= (caar todo) new-score)
-             (loop (cdr todo)
-                   (cons (queue-line-add (car todo) state new-score)
-                         smaller)
-                   #t))
-          ((= (caar todo) old-score)
-             (append (reverse smaller)
-                     (if seen '() (list (queue-line-new state new-score)))
-                     (queue-line-head-rm todo state old-score)))
-          (else
-             (assert (< (caar todo) old-score))
-             (loop (cdr todo)
-                   (cons (car todo) smaller)
-                   smaller)))))
+  (mapping-set!
+    (mapping-delete! queue (cons old-score state))
+    (cons new-score state)))
 
 (define (make-queue scores states)
   (let loop ((todo   states)
-             (result '()))
+             (result (mapping scored-state-comparator)))
     (if (null? todo)
         result
         (loop (cdr todo)
               (queue-add result
                          (car todo)
-                         (hash-table-ref scores (car todo)))))))
+                         (vector-ref scores (state-index (car todo))))))))
 
 (define (queue-pop queue)
-  (let* ((first-line (car   queue))
-         (tail       (cdr   queue))
-         (min-score  (car   first-line))
-         (result     (cadr  first-line))
-         (rest       (cddr  first-line)))
-    (if (null? rest)
-        (cons result tail)
-        (cons result (cons (cons min-score rest) tail)))))
+  (let ((result (mapping-min-key queue)))
+    (cons (cdr result) (mapping-delete! queue result))))
 
 ;; Good old Djikstra
 
-(define answer-1
-  (let ((scores  (make-hash-table))
-        (sources (make-hash-table))
-        (visited (make-hash-table))
+(define (answer a b next-states final?)
+  (let ((scores  (make-vector max-state-index 0))
+        (visited (make-vector max-state-index 0))
         (start   '((1 0 1 right) (0 1 1 down)))
-        (total   (* data-width data-height 12)))
+        (total   (* data-width data-height a)))
     (for-each
       (lambda (state)
-        (hash-table-set! visited state #f)
-        (hash-table-set! scores  state (state->score state)))
+        (vector-set! visited (state-index state) 1)
+        (vector-set! scores (state-index state) (state->score state)))
       start)
     (let loop ((unvisited (make-queue scores start)) (result '()) (count 1))
-      (if (or (null? unvisited) (= (length result) 6))
+      (if (or (null? unvisited) (= (length result) b))
           (apply min result)
           (let* ((reordered (queue-pop unvisited))
                  (state     (car reordered))
-                 (score     (hash-table-ref scores state))
+                 (score     (vector-ref scores (state-index state)))
                  (queue     (cdr reordered))
-                 (next      (next-states-1 state))
+                 (next      (next-states state))
                  (new-next  (filter
-                              (lambda (s) (not (hash-table-exists? visited s)))
+                              (lambda (s) (= (vector-ref visited (state-index s)) 0))
                               next)))
-            (assert (not (hash-table-ref visited state)))
-;(when (final-1? state)
+            (assert (= (vector-ref visited (state-index state)) 1))
+;(when (final? state)
 ;  (write-line (conc "final score " score))
 ;  (let local-loop ((s state))
 ;    (write-line (conc "  from " s " at " (hash-table-ref scores s)))
@@ -222,33 +208,34 @@
 (write-string (conc (quotient (* 100 count) total) "%\r"))
             (for-each
               (lambda (s)
-                (let ((new-score (+ score (state->score s))))
-                  (hash-table-set! visited s #f)
-                  (hash-table-set! scores  s new-score)
-                  (hash-table-set! sources s state)
+                (let ((new-score (+ score (state->score s)))
+                      (index (state-index s)))
+                  (vector-set! visited index 1)
+                  (vector-set! scores index new-score)
                   (set! queue (queue-add queue s new-score))))
               new-next)
             (for-each
               (lambda (s)
-                (let ((new-score (+ score (state->score s)))
-                      (old-score (hash-table-ref scores s)))
+                (let* ((new-score (+ score (state->score s)))
+                       (index (state-index s))
+                       (old-score (vector-ref scores index)))
                   (when (< new-score old-score)
-                    (assert (not (hash-table-ref visited s)))
+                    (assert (= (vector-ref visited index) 1))
                     (set! queue (queue-update queue s old-score new-score))
-                    (hash-table-set! scores s new-score)
-                    (hash-table-set! sources s state))))
+                    (vector-set! scores index new-score))))
               next)
-            (hash-table-set! visited state #t)
+            (vector-set! visited (state-index state) 2)
             (loop queue
-                  (if (final-1? state)
+                  (if (final? state)
                       (begin
                         (when verbose
+                          (write-line "")
                           (write-line (conc "Final state " state " " score)))
                         (cons score result))
                       result)
                    (add1 count)))))))
 
-(write-line (conc "First puzzle:  " answer-1))
+(write-line (conc "First puzzle:  " (answer 12 6 next-states-1 final-1?)))
 
 ;;;;;;;;;;;;;;;;;
 ;; Second Puzzle
@@ -281,66 +268,4 @@
   (and (final-1? state)
        (>= (caddr state) 4)))
 
-(define answer-2
-  (let ((scores  (make-hash-table))
-        (sources (make-hash-table))
-        (visited (make-hash-table))
-        (start   '((1 0 1 right) (0 1 1 down)))
-        (total   (* data-width data-height 10 4)))
-    (for-each
-      (lambda (state)
-        (hash-table-set! visited state #f)
-        (hash-table-set! scores  state (state->score state)))
-      start)
-    (let loop ((unvisited (make-queue scores start)) (result '()) (count 1))
-      (if (or (null? unvisited) (= (length result) 14))
-          (apply min result)
-          (let* ((reordered (queue-pop unvisited))
-                 (state     (car reordered))
-                 (score     (hash-table-ref scores state))
-                 (queue     (cdr reordered))
-                 (next      (next-states-2 state))
-                 (new-next  (filter
-                              (lambda (s) (not (hash-table-exists? visited s)))
-                              next)))
-            (assert (not (hash-table-ref visited state)))
-;(when (final-2? state)
-;  (write-line (conc "final score " score))
-;  (let local-loop ((s state))
-;    (write-line (conc "  from " s " at " (hash-table-ref scores s)))
-;    (when (hash-table-exists? sources s)
-;      (local-loop (hash-table-ref sources s)))))
-;(write-line (conc "State " state " " score))
-;(write-line (conc "  next: " next))
-;(write-line (conc "  new: " new-next))
-(write-string (conc (quotient (* 100 count) total) "%\r"))
-            (for-each
-              (lambda (s)
-                (let ((new-score (+ score (state->score s))))
-                  (hash-table-set! visited s #f)
-                  (hash-table-set! scores  s new-score)
-                  (hash-table-set! sources s state)
-                  (set! queue (queue-add queue s new-score))))
-              new-next)
-            (for-each
-              (lambda (s)
-                (let ((new-score (+ score (state->score s)))
-                      (old-score (hash-table-ref scores s)))
-                  (when (< new-score old-score)
-                    (assert (not (hash-table-ref visited s)))
-                    (set! queue (queue-update queue s old-score new-score))
-                    (hash-table-set! scores s new-score)
-                    (hash-table-set! sources s state))))
-              next)
-            (hash-table-set! visited state #t)
-            (loop queue
-                  (if (final-2? state)
-                      (begin
-                        (when verbose
-                          (write-line (conc "Final state " state " " score)))
-                        (cons score result))
-                      result)
-                   (add1 count)))))))
-
-(write-line (conc "Second puzzle: " answer-2))
-
+(write-line (conc "Second puzzle: " (answer 40 14 next-states-2 final-2?)))
